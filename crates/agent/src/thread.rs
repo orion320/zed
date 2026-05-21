@@ -2,16 +2,16 @@ use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
     DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool,
     FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
-    ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool, RenameTool, SpawnAgentTool,
-    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
-    UpdatePlanTool, UpdateTitleTool, UserAgentsMd, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings,
+    ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool, ReadFileWithLineNumbersTool,
+    RenameTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool,
+    ToolPermissionDecision, UpdatePlanTool, UpdateTitleTool, UserAgentsMd, WebSearchTool,
+    WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
 use feature_flags::{
-    FeatureFlagAppExt as _, LspToolFeatureFlag, RenameToolFeatureFlag, UpdatePlanToolFeatureFlag,
-    UpdateTitleToolFeatureFlag,
+    FeatureFlagAppExt as _, LspToolFeatureFlag, ReadFileToolWithLineNumbersFeatureFlag,
+    RenameToolFeatureFlag, UpdatePlanToolFeatureFlag, UpdateTitleToolFeatureFlag,
 };
 
 use agent_client_protocol::schema as acp;
@@ -1694,6 +1694,11 @@ impl Thread {
             self.action_log.clone(),
             update_agent_location,
         ));
+        self.add_tool(ReadFileWithLineNumbersTool::new(
+            self.project.clone(),
+            self.action_log.clone(),
+            update_agent_location,
+        ));
         self.add_tool(TerminalTool::new(self.project.clone(), environment.clone()));
         self.add_tool(WebSearchTool);
 
@@ -3022,27 +3027,43 @@ impl Thread {
             }
         }
 
-        let mut tools = self
-            .tools
-            .iter()
-            .filter_map(|(tool_name, tool)| {
-                if tool.supports_provider(&model.provider_id())
-                    && profile.is_tool_enabled(tool_name)
-                {
-                    Some((truncate(tool_name), tool.clone()))
-                } else {
-                    None
-                }
-            })
-            .filter(|(tool_name, _)| match tool_name.as_ref() {
-                RenameTool::NAME => cx.has_flag::<RenameToolFeatureFlag>(),
-                FindReferencesTool::NAME
-                | GetCodeActionsTool::NAME
-                | ApplyCodeActionTool::NAME
-                | GoToDefinitionTool::NAME => cx.has_flag::<LspToolFeatureFlag>(),
-                _ => true,
-            })
-            .collect::<BTreeMap<_, _>>();
+        let use_read_file_with_line_numbers =
+            cx.has_flag::<ReadFileToolWithLineNumbersFeatureFlag>();
+
+        let mut tools =
+            self.tools
+                .iter()
+                .filter_map(|(tool_name, tool)| {
+                    let profile_tool_name = if tool_name == ReadFileWithLineNumbersTool::NAME {
+                        ReadFileTool::NAME
+                    } else {
+                        tool_name.as_ref()
+                    };
+
+                    if tool.supports_provider(&model.provider_id())
+                        && profile.is_tool_enabled(profile_tool_name)
+                    {
+                        match (tool_name.as_ref(), use_read_file_with_line_numbers) {
+                            (ReadFileWithLineNumbersTool::NAME, false)
+                            | (ReadFileTool::NAME, true) => None,
+                            (ReadFileWithLineNumbersTool::NAME, true) => {
+                                Some((SharedString::from(ReadFileTool::NAME), tool.clone()))
+                            }
+                            _ => Some((truncate(tool_name), tool.clone())),
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .filter(|(tool_name, _)| match tool_name.as_ref() {
+                    RenameTool::NAME => cx.has_flag::<RenameToolFeatureFlag>(),
+                    FindReferencesTool::NAME
+                    | GetCodeActionsTool::NAME
+                    | ApplyCodeActionTool::NAME
+                    | GoToDefinitionTool::NAME => cx.has_flag::<LspToolFeatureFlag>(),
+                    _ => true,
+                })
+                .collect::<BTreeMap<_, _>>();
 
         let mut context_server_tools = Vec::new();
         let mut seen_tools = tools.keys().cloned().collect::<HashSet<_>>();

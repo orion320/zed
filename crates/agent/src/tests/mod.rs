@@ -5959,6 +5959,100 @@ async fn test_lsp_tools_gated_by_feature_flag(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_read_file_with_line_numbers_gated_by_feature_flag(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::default());
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+
+    let thread = cx.new(|cx| {
+        let mut thread = Thread::new(
+            project,
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model.clone() as Arc<dyn LanguageModel>),
+            cx,
+        );
+        thread.add_default_tools(environment, cx);
+        thread
+    });
+
+    thread.read_with(cx, |thread, _| {
+        assert!(thread.has_registered_tool(ReadFileTool::NAME));
+        assert!(thread.has_registered_tool(ReadFileWithLineNumbersTool::NAME));
+    });
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(UserMessageId::new(), ["hello"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let completion = model.pending_completions().pop().unwrap();
+    let read_file_tools = completion
+        .tools
+        .iter()
+        .filter(|tool| tool.name == ReadFileTool::NAME)
+        .collect::<Vec<_>>();
+    assert_eq!(read_file_tools.len(), 1);
+    assert!(
+        !completion
+            .tools
+            .iter()
+            .any(|tool| tool.name == ReadFileWithLineNumbersTool::NAME),
+        "internal read_file variant should not be exposed to the model"
+    );
+    assert!(
+        !read_file_tools[0].description.contains("cat -n"),
+        "line-numbered read_file description should be hidden without the flag"
+    );
+    model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        cx.update_flags(false, vec!["read-file-tool-with-line-numbers".to_string()]);
+    });
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(UserMessageId::new(), ["hello again"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let completion = model.pending_completions().pop().unwrap();
+    let read_file_tools = completion
+        .tools
+        .iter()
+        .filter(|tool| tool.name == ReadFileTool::NAME)
+        .collect::<Vec<_>>();
+    assert_eq!(read_file_tools.len(), 1);
+    assert!(
+        !completion
+            .tools
+            .iter()
+            .any(|tool| tool.name == ReadFileWithLineNumbersTool::NAME),
+        "internal read_file variant should not be exposed to the model"
+    );
+    assert!(
+        read_file_tools[0].description.contains("cat -n"),
+        "line-numbered read_file description should be exposed when the flag is enabled"
+    );
+    model.end_last_completion_stream();
+}
+
+#[gpui::test]
 async fn test_parent_cancel_stops_subagent(cx: &mut TestAppContext) {
     init_test(cx);
 

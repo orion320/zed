@@ -35,6 +35,44 @@ fn resolve_line_range(start_line: Option<u32>, end_line: Option<u32>) -> (u32, u
     (start, end)
 }
 
+#[derive(Clone, Copy)]
+enum ReadFileOutputFormat {
+    Plain,
+    LineNumbered,
+}
+
+impl ReadFileOutputFormat {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Plain => "without line numbers",
+            Self::LineNumbered => "with line numbers",
+        }
+    }
+
+    fn format_text(self, text: String, start_line: u32) -> String {
+        match self {
+            Self::Plain => text,
+            Self::LineNumbered => format_with_line_numbers(&text, start_line),
+        }
+    }
+
+    fn write_chunks<'a>(
+        self,
+        output: &mut String,
+        chunks: impl IntoIterator<Item = &'a str>,
+        start_line: u32,
+    ) {
+        match self {
+            Self::Plain => {
+                for chunk in chunks {
+                    output.push_str(chunk);
+                }
+            }
+            Self::LineNumbered => write_lines_numbered(output, chunks, start_line),
+        }
+    }
+}
+
 /// Prefixes each line of `text` with its line number in `cat -n` format:
 /// the line number is right-aligned in a 6-character field, followed by a
 /// single tab, followed by the line's original content (including its
@@ -106,6 +144,7 @@ async fn read_global_skill_file(
     end_line: Option<u32>,
     requested_path: &str,
     event_stream: &ToolCallEventStream,
+    output_format: ReadFileOutputFormat,
 ) -> Result<LanguageModelToolResultContent, LanguageModelToolResultContent> {
     let content = fs.load(canonical_path).await.map_err(tool_content_err)?;
 
@@ -127,7 +166,7 @@ async fn read_global_skill_file(
         (content, 1)
     };
 
-    let result_text = format_with_line_numbers(&raw_text, first_line_number);
+    let result_text = output_format.format_text(raw_text, first_line_number);
 
     let markdown = MarkdownCodeBlock {
         tag: requested_path,
@@ -179,11 +218,15 @@ pub struct ReadFileToolInput {
     pub end_line: Option<u32>,
 }
 
+#[derive(Clone)]
 pub struct ReadFileTool {
     project: Entity<Project>,
     action_log: Entity<ActionLog>,
     update_agent_location: bool,
+    output_format: ReadFileOutputFormat,
 }
+
+pub struct ReadFileWithLineNumbersTool(ReadFileTool);
 
 impl ReadFileTool {
     pub fn new(
@@ -191,11 +234,41 @@ impl ReadFileTool {
         action_log: Entity<ActionLog>,
         update_agent_location: bool,
     ) -> Self {
+        Self::with_output_format(
+            project,
+            action_log,
+            update_agent_location,
+            ReadFileOutputFormat::Plain,
+        )
+    }
+
+    fn with_output_format(
+        project: Entity<Project>,
+        action_log: Entity<ActionLog>,
+        update_agent_location: bool,
+        output_format: ReadFileOutputFormat,
+    ) -> Self {
         Self {
             project,
             action_log,
             update_agent_location,
+            output_format,
         }
+    }
+}
+
+impl ReadFileWithLineNumbersTool {
+    pub fn new(
+        project: Entity<Project>,
+        action_log: Entity<ActionLog>,
+        update_agent_location: bool,
+    ) -> Self {
+        Self(ReadFileTool::with_output_format(
+            project,
+            action_log,
+            update_agent_location,
+            ReadFileOutputFormat::LineNumbered,
+        ))
     }
 }
 
@@ -244,6 +317,8 @@ impl AgentTool for ReadFileTool {
     ) -> Task<Result<LanguageModelToolResultContent, LanguageModelToolResultContent>> {
         let project = self.project.clone();
         let action_log = self.action_log.clone();
+        let output_format = self.output_format;
+        log::info!("Using read_file tool {}", output_format.description());
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -265,6 +340,7 @@ impl AgentTool for ReadFileTool {
                     input.end_line,
                     &input.path,
                     &event_stream,
+                    output_format,
                 )
                 .await;
             }
@@ -426,11 +502,8 @@ impl AgentTool for ReadFileTool {
                     // read at least one line.
                     let start_anchor = buffer.anchor_before(Point::new(start_row, 0));
                     let end_anchor = buffer.anchor_before(Point::new(end, 0));
-                    // Stream the numbered output directly from the buffer's
-                    // chunk iterator so the unnumbered range is never
-                    // materialized as its own `String`.
                     let mut output = String::new();
-                    write_lines_numbered(
+                    output_format.write_chunks(
                         &mut output,
                         buffer.text_for_range(start_anchor..end_anchor),
                         start,
@@ -473,7 +546,7 @@ impl AgentTool for ReadFileTool {
                     }
                     .into())
                 } else {
-                    Ok(format_with_line_numbers(&buffer_content.text, 1).into())
+                    Ok(output_format.format_text(buffer_content.text, 1).into())
                 }
             };
 
@@ -529,6 +602,54 @@ impl AgentTool for ReadFileTool {
     }
 }
 
+impl AgentTool for ReadFileWithLineNumbersTool {
+    type Input = ReadFileToolInput;
+    type Output = LanguageModelToolResultContent;
+
+    const NAME: &'static str = "read_file_with_line_numbers";
+
+    fn description() -> SharedString {
+        format!(
+            "{}\n\nWhen reading text files, this tool prefixes each line of output with \
+             a `cat -n`-style line number: the line number is right-aligned in a \
+             6-character field followed by a single tab, then the line's actual content.",
+            <ReadFileTool as AgentTool>::description()
+        )
+        .into()
+    }
+
+    fn kind() -> acp::ToolKind {
+        <ReadFileTool as AgentTool>::kind()
+    }
+
+    fn initial_title(
+        &self,
+        input: Result<Self::Input, serde_json::Value>,
+        cx: &mut App,
+    ) -> SharedString {
+        self.0.initial_title(input, cx)
+    }
+
+    fn run(
+        self: Arc<Self>,
+        input: ToolInput<Self::Input>,
+        event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Task<Result<LanguageModelToolResultContent, LanguageModelToolResultContent>> {
+        Arc::new(self.0.clone()).run(input, event_stream, cx)
+    }
+
+    fn replay(
+        &self,
+        input: Self::Input,
+        output: Self::Output,
+        event_stream: ToolCallEventStream,
+        cx: &mut App,
+    ) -> Result<()> {
+        self.0.replay(input, output, event_stream, cx)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -555,7 +676,7 @@ mod test {
         .await;
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let (event_stream, _) = ToolCallEventStream::test();
 
         let result = cx
@@ -582,7 +703,7 @@ mod test {
         fs.insert_tree(path!("/root"), json!({})).await;
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let (event_stream, _) = ToolCallEventStream::test();
 
         let result = cx
@@ -615,7 +736,7 @@ mod test {
         .await;
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -637,6 +758,38 @@ mod test {
     }
 
     #[gpui::test]
+    async fn test_read_small_file_without_line_numbers(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                "small_file.txt": "This is a small file content"
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let result = cx
+            .update(|cx| {
+                let input = ReadFileToolInput {
+                    path: "root/small_file.txt".into(),
+                    start_line: None,
+                    end_line: None,
+                };
+                tool.run(
+                    ToolInput::resolved(input),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await;
+        assert_eq!(result.unwrap(), "This is a small file content".into());
+    }
+
+    #[gpui::test]
     async fn test_read_large_file(cx: &mut TestAppContext) {
         init_test(cx);
 
@@ -652,7 +805,7 @@ mod test {
         let language_registry = project.read_with(cx, |project, _| project.languages().clone());
         language_registry.add(language::rust_lang());
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -738,7 +891,7 @@ mod test {
         let language_registry = project.read_with(cx, |project, _| project.languages().clone());
         language_registry.add(language::rust_lang());
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let (event_stream, mut rx) = ToolCallEventStream::test();
 
         let result = cx
@@ -807,7 +960,7 @@ mod test {
         .await;
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let (event_stream, mut rx) = ToolCallEventStream::test();
 
         cx.update(|cx| {
@@ -862,7 +1015,7 @@ mod test {
         .await;
         let project = Project::test(fs.clone(), [path!("/foo").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         // The tool schema says the first component must be the worktree root name,
         // so "foo/test.txt" means test.txt at the root of the "foo" worktree.
@@ -898,7 +1051,7 @@ mod test {
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
         let result = cx
             .update(|cx| {
                 let input = ReadFileToolInput {
@@ -933,7 +1086,7 @@ mod test {
         .await;
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         // start_line of 0 should be treated as 1
         let result = cx
@@ -1063,7 +1216,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/project_root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         // Reading a file outside the project worktree should fail
         let result = cx
@@ -1258,7 +1411,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let (event_stream, mut event_rx) = ToolCallEventStream::test();
         let read_task = cx.update(|cx| {
@@ -1367,7 +1520,11 @@ mod test {
         .await;
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project.clone(), action_log.clone(), true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(
+            project.clone(),
+            action_log.clone(),
+            true,
+        ));
 
         // Test reading allowed files in worktree1
         let result = cx
@@ -1554,7 +1711,11 @@ mod test {
         cx.executor().run_until_parked();
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project.clone(), action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(
+            project.clone(),
+            action_log,
+            true,
+        ));
 
         let (event_stream, mut event_rx) = ToolCallEventStream::test();
         let task = cx.update(|cx| {
@@ -1616,7 +1777,11 @@ mod test {
         cx.executor().run_until_parked();
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project.clone(), action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(
+            project.clone(),
+            action_log,
+            true,
+        ));
 
         let (event_stream, mut event_rx) = ToolCallEventStream::test();
         let task = cx.update(|cx| {
@@ -1679,7 +1844,11 @@ mod test {
         cx.executor().run_until_parked();
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project.clone(), action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(
+            project.clone(),
+            action_log,
+            true,
+        ));
 
         let (event_stream, mut event_rx) = ToolCallEventStream::test();
         let result = cx
@@ -1743,7 +1912,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {
@@ -1792,7 +1961,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {
@@ -1839,7 +2008,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {
@@ -1884,7 +2053,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {
@@ -1929,7 +2098,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {
@@ -1974,7 +2143,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {
@@ -2012,7 +2181,7 @@ mod test {
 
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let tool = Arc::new(ReadFileWithLineNumbersTool::new(project, action_log, true));
 
         let result = cx
             .update(|cx| {

@@ -71,6 +71,18 @@ impl FeatureFlag for UpdateTitleToolFeatureFlag {
 }
 register_feature_flag!(UpdateTitleToolFeatureFlag);
 
+pub struct ReadFileToolWithLineNumbersFeatureFlag;
+
+impl FeatureFlag for ReadFileToolWithLineNumbersFeatureFlag {
+    const NAME: &'static str = "read-file-tool-with-line-numbers";
+    type Value = PresenceFlag;
+
+    fn enabled_for_staff() -> bool {
+        false
+    }
+}
+register_feature_flag!(ReadFileToolWithLineNumbersFeatureFlag);
+
 pub struct LspToolFeatureFlag;
 
 impl FeatureFlag for LspToolFeatureFlag {
