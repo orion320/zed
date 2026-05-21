@@ -11,7 +11,10 @@ use language_model::{
     LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice, RateLimiter,
 };
-use open_ai::{ReasoningEffort, responses::stream_response};
+use open_ai::{
+    ReasoningEffort, ServiceTier,
+    responses::{StreamEvent as ResponsesStreamEvent, stream_response},
+};
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -510,9 +513,15 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
             }
 
             let access_token = creds.access_token.clone();
+            // TODO(tomhoule): remove. Temporary manual-testing instrumentation:
+            // log every echoed `service_tier`, and panic if Fast Mode was
+            // requested but the Codex backend silently downgraded or rejected
+            // the parameter.
+            let requested_priority =
+                responses_request.service_tier == Some(ServiceTier::Priority);
             request_limiter
                 .stream(async move {
-                    stream_response(
+                    let stream = stream_response(
                         http_client.as_ref(),
                         PROVIDER_NAME.0.as_str(),
                         CODEX_BASE_URL,
@@ -521,7 +530,31 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
                         extra_headers,
                     )
                     .await
-                    .map_err(LanguageModelCompletionError::from)
+                    .map_err(LanguageModelCompletionError::from)?;
+                    Ok(stream.inspect(move |event| {
+                        let (kind, echoed) = match event {
+                            Ok(ResponsesStreamEvent::Created { response }) => {
+                                ("created", response.service_tier)
+                            }
+                            Ok(ResponsesStreamEvent::InProgress { response }) => {
+                                ("in_progress", response.service_tier)
+                            }
+                            Ok(ResponsesStreamEvent::Completed { response }) => {
+                                ("completed", response.service_tier)
+                            }
+                            _ => return,
+                        };
+                        log::info!(
+                            "ChatGPT Subscription Responses event {kind}: requested_priority = {requested_priority}, echoed service_tier = {echoed:?}",
+                        );
+                        if requested_priority {
+                            assert_eq!(
+                                echoed,
+                                Some(ServiceTier::Priority),
+                                "Fast Mode requested but ChatGPT Subscription backend echoed service_tier = {echoed:?}",
+                            );
+                        }
+                    }))
                 })
                 .await
         });
