@@ -106,6 +106,7 @@ use workspace::{
     CloseIntent, CloseProject, CloseWindow, RestoreBanner, with_active_or_new_workspace,
 };
 use workspace::{Pane, notifications::DetachAndPromptErr};
+use workspace::quit_confirm_modal::{collect_close_confirm_labels, prompt_quit_confirmation};
 use zed_actions::{
     About, GetMerch, OpenAccountSettings, OpenBrowser, OpenDocs, OpenProjectTasks,
     OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
@@ -1783,6 +1784,22 @@ fn quit(_: &Quit, cx: &mut App) {
                 if answer != Some(0) {
                     return Ok(());
                 }
+            }
+        }
+
+        // Stronger gate for in-flight work: any item whose `should_confirm_close`
+        // is true (e.g. a terminal running Claude Code, ssh, vim, a build, a REPL)
+        // forces a type-Y confirmation in the active window before the per-workspace
+        // close walk begins. Bypassed entirely when nothing is running.
+        let running = collect_close_confirm_labels(&workspace_windows, cx);
+        if let Some(active_window) = workspace_windows.first().copied()
+            && !running.is_empty()
+        {
+            WAITING_QUIT_CONFIRMATION.store(true, atomic::Ordering::Release);
+            let confirmed = prompt_quit_confirmation(active_window, running, cx).await;
+            WAITING_QUIT_CONFIRMATION.store(false, atomic::Ordering::Release);
+            if !confirmed {
+                return Ok(());
             }
         }
 

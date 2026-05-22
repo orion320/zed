@@ -31,7 +31,9 @@ use crate::{
     CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
     Panel, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
+    quit_confirm_modal::{QuitConfirmModal, labels_for_multi_workspace},
 };
+use futures::channel::oneshot;
 
 actions!(
     multi_workspace,
@@ -556,6 +558,24 @@ impl MultiWorkspace {
 
     pub fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
+            // Type-Y gate for any item with in-flight work (terminals running
+            // claude, ssh, vim, builds, etc.) before this window is torn down.
+            // Mirrors the gate in `zed::quit`; the two paths share no other code.
+            let running = this.update(cx, |multi_workspace, cx| {
+                labels_for_multi_workspace(multi_workspace, cx)
+            })?;
+            if !running.is_empty() {
+                let (tx, rx) = oneshot::channel();
+                this.update_in(cx, |multi_workspace, window, cx| {
+                    multi_workspace.toggle_modal(window, cx, |_window, cx| {
+                        QuitConfirmModal::new(running, tx, cx)
+                    });
+                })?;
+                if !rx.await.unwrap_or(false) {
+                    return anyhow::Ok(());
+                }
+            }
+
             let workspaces = this.update(cx, |multi_workspace, _cx| {
                 multi_workspace.workspaces().cloned().collect::<Vec<_>>()
             })?;

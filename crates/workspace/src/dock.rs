@@ -504,6 +504,10 @@ impl Dock {
             .find_map(|entry| entry.panel.to_any().downcast().ok())
     }
 
+    pub fn panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.panel_entries.iter().map(|entry| &entry.panel)
+    }
+
     pub fn panel_index_for_type<T: Panel>(&self) -> Option<usize> {
         self.panel_entries
             .iter()

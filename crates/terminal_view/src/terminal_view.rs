@@ -1852,6 +1852,16 @@ impl Item for TerminalView {
         cx.background_spawn(async move { matches!(answer.await, Ok(0)) })
     }
 
+    fn close_confirm_label(&self, cx: &App) -> Option<gpui::SharedString> {
+        if !self.should_confirm_close(cx) {
+            return None;
+        }
+        self.terminal()
+            .read(cx)
+            .foreground_process_name()
+            .map(Into::into)
+    }
+
     fn added_to_workspace(
         &mut self,
         workspace: &mut Workspace,

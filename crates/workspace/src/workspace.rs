@@ -15,6 +15,7 @@ pub mod path_list {
 }
 pub mod path_link;
 mod persistence;
+pub mod quit_confirm_modal;
 pub mod searchable;
 pub mod security_modal;
 pub mod shared_screen;

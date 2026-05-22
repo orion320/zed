@@ -292,6 +292,13 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     ) -> Task<bool> {
         Task::ready(true)
     }
+    /// Short label naming the in-flight work that confirmation is gating
+    /// (e.g. the foreground process for a terminal). Used by batched
+    /// confirmation surfaces like quit, which list items by name rather
+    /// than prompting per-item.
+    fn close_confirm_label(&self, _cx: &App) -> Option<SharedString> {
+        None
+    }
     fn capability(&self, _: &App) -> Capability {
         Capability::ReadWrite
     }
@@ -543,6 +550,7 @@ pub trait ItemHandle: 'static + Send {
     fn is_dirty(&self, cx: &App) -> bool;
     fn should_confirm_close(&self, cx: &App) -> bool;
     fn confirm_close(&self, window: &mut Window, cx: &mut App) -> Task<bool>;
+    fn close_confirm_label(&self, cx: &App) -> Option<SharedString>;
     fn capability(&self, cx: &App) -> Capability;
     fn toggle_read_only(&self, window: &mut Window, cx: &mut App);
     fn has_deleted_file(&self, cx: &App) -> bool;
@@ -1062,6 +1070,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn confirm_close(&self, window: &mut Window, cx: &mut App) -> Task<bool> {
         self.update(cx, |item, cx| item.confirm_close(window, cx))
+    }
+
+    fn close_confirm_label(&self, cx: &App) -> Option<SharedString> {
+        self.read(cx).close_confirm_label(cx)
     }
 
     fn capability(&self, cx: &App) -> Capability {
