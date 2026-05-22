@@ -2106,6 +2106,12 @@
     "show_count_badge": false,
     // Whether to invoke the OS-specific alert sound when the terminal bell (BEL character) is printed.
     "bell": "off",
+    // When to prompt for confirmation before closing a terminal tab.
+    //   "never":               never prompt (legacy behavior)
+    //   "if_process_running":  prompt only when a non-shell foreground
+    //                          process is running (ssh, vim, builds, agent sessions, etc.)
+    //   "always":              prompt on every close
+    "confirm_close": "if_process_running",
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

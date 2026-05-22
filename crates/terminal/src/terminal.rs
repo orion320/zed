@@ -2977,6 +2977,18 @@ impl Terminal {
         }
     }
 
+    /// Returns the cached name of the foreground process running in this terminal.
+    /// Reads the value last refreshed by the title-update task, so this is cheap
+    /// to call from event handlers (no fresh process scan).
+    pub fn foreground_process_name(&self) -> Option<String> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                info.current.read().as_ref().map(|p| p.name.clone())
+            }
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     pub fn task(&self) -> Option<&TaskState> {
         self.task.as_ref()
     }

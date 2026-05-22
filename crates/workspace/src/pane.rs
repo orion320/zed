@@ -1982,6 +1982,33 @@ impl Pane {
             return Task::ready(Ok(()));
         };
         cx.spawn_in(window, async move |pane, cx| {
+            let mut items_to_close = items_to_close;
+
+            // Per-item confirm-close gate (e.g. terminals with running processes).
+            // Runs before the dirty-items save flow so cancelling here also skips the save prompt.
+            let items_to_confirm = workspace.update(cx, |_workspace, cx| {
+                items_to_close
+                    .iter()
+                    .filter(|item| item.should_confirm_close(cx))
+                    .map(|item| item.boxed_clone())
+                    .collect::<Vec<_>>()
+            })?;
+            let mut cancelled = collections::HashSet::default();
+            for item in items_to_confirm {
+                let proceed = pane
+                    .update_in(cx, |_, window, cx| item.confirm_close(window, cx))?
+                    .await;
+                if !proceed {
+                    cancelled.insert(item.item_id());
+                }
+            }
+            if !cancelled.is_empty() {
+                items_to_close.retain(|item| !cancelled.contains(&item.item_id()));
+                if items_to_close.is_empty() {
+                    return Ok(());
+                }
+            }
+
             let dirty_items = workspace.update(cx, |workspace, cx| {
                 items_to_close
                     .iter()

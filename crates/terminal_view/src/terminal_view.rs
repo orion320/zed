@@ -11,7 +11,8 @@ use editor::{
 use gpui::{
     Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription, Task, TaskExt,
+    Pixels, Point as GpuiPoint, PromptLevel, Render, ScrollWheelEvent, Styled, Subscription, Task,
+    TaskExt,
     WeakEntity, actions, anchored, deferred, div,
 };
 use menu;
@@ -20,7 +21,8 @@ use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
-    SeedQuerySetting, Settings, SettingsStore, TerminalBell, TerminalBlink, WorkingDirectory,
+    SeedQuerySetting, Settings, SettingsStore, TerminalBell, TerminalBlink, TerminalConfirmClose,
+    WorkingDirectory,
 };
 use std::{
     any::Any,
@@ -1811,6 +1813,43 @@ impl Item for TerminalView {
             }],
             None,
         ))
+    }
+
+    fn should_confirm_close(&self, cx: &App) -> bool {
+        match TerminalSettings::get_global(cx).confirm_close {
+            TerminalConfirmClose::Never => false,
+            TerminalConfirmClose::Always => true,
+            TerminalConfirmClose::IfProcessRunning => {
+                // Only the user's interactive shell at an idle prompt is silent;
+                // anything else (CC, ssh, vim, builds, REPLs) gets a confirm.
+                let Some(name) = self.terminal().read(cx).foreground_process_name() else {
+                    return false;
+                };
+                !matches!(
+                    name.as_str(),
+                    "bash" | "zsh" | "fish" | "sh" | "nu" | "dash" | "pwsh" | "powershell"
+                )
+            }
+        }
+    }
+
+    fn confirm_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let process_name = self.terminal().read(cx).foreground_process_name();
+        let detail = process_name
+            .as_ref()
+            .map(|name| format!("\"{}\" is still running.", name));
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Close terminal with running process?",
+            detail.as_deref(),
+            &["Close anyway", "Keep open"],
+            cx,
+        );
+        cx.background_spawn(async move { matches!(answer.await, Ok(0)) })
     }
 
     fn added_to_workspace(

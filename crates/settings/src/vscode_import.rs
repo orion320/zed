@@ -945,6 +945,7 @@ impl VsCodeSettings {
             toolbar: None,
             show_count_badge: None,
             flexible: None,
+            confirm_close: None,
         })
     }
 

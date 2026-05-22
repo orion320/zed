@@ -195,6 +195,40 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: "system"
     pub bell: Option<TerminalBell>,
+    /// When to prompt for confirmation before closing a terminal tab.
+    ///
+    /// - "never": close silently (legacy behavior)
+    /// - "if_process_running": prompt only when a non-shell foreground
+    ///   process is running (e.g. ssh, vim, a build, an agent session)
+    /// - "always": prompt on every close
+    ///
+    /// Default: "if_process_running"
+    pub confirm_close: Option<TerminalConfirmClose>,
+}
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalConfirmClose {
+    /// Never prompt before closing a terminal tab.
+    Never,
+    /// Prompt only when a non-shell foreground process is running.
+    #[default]
+    IfProcessRunning,
+    /// Always prompt before closing a terminal tab.
+    Always,
 }
 
 /// Shell configuration to open the terminal with.
