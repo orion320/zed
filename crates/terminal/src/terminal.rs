@@ -2989,6 +2989,16 @@ impl Terminal {
         }
     }
 
+    /// Returns true when the terminal's shell process has any live descendant
+    /// processes. Used on Windows where `foreground_process_name` always reports
+    /// the PTY's direct child (the shell), since `tcgetpgrp` is not available.
+    pub fn has_active_descendants(&self) -> bool {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info.has_active_descendants(),
+            TerminalType::DisplayOnly => false,
+        }
+    }
+
     pub fn task(&self) -> Option<&TaskState> {
         self.task.as_ref()
     }

@@ -1820,15 +1820,26 @@ impl Item for TerminalView {
             TerminalConfirmClose::Never => false,
             TerminalConfirmClose::Always => true,
             TerminalConfirmClose::IfProcessRunning => {
-                // Only the user's interactive shell at an idle prompt is silent;
-                // anything else (CC, ssh, vim, builds, REPLs) gets a confirm.
-                let Some(name) = self.terminal().read(cx).foreground_process_name() else {
-                    return false;
-                };
-                !matches!(
-                    name.as_str(),
-                    "bash" | "zsh" | "fish" | "sh" | "nu" | "dash" | "pwsh" | "powershell"
-                )
+                let terminal = self.terminal().read(cx);
+                // On Windows the PTY's child is always the shell (no tcgetpgrp), so
+                // foreground_process_name returns "pwsh"/"cmd" even when the user is
+                // running cc/ssh/build. Probe for descendant processes instead.
+                #[cfg(windows)]
+                {
+                    terminal.has_active_descendants()
+                }
+                #[cfg(not(windows))]
+                {
+                    // Only the user's interactive shell at an idle prompt is silent;
+                    // anything else (CC, ssh, vim, builds, REPLs) gets a confirm.
+                    let Some(name) = terminal.foreground_process_name() else {
+                        return false;
+                    };
+                    !matches!(
+                        name.as_str(),
+                        "bash" | "zsh" | "fish" | "sh" | "nu" | "dash" | "pwsh" | "powershell"
+                    )
+                }
             }
         }
     }
@@ -1838,8 +1849,17 @@ impl Item for TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let process_name = self.terminal().read(cx).foreground_process_name();
-        let detail = process_name
+        // On Windows we can't identify the active descendant by name (see
+        // `should_confirm_close`), so we use a generic message rather than the
+        // shell name, which would be misleading.
+        #[cfg(windows)]
+        let detail: Option<String> =
+            Some("An active child process is still running.".to_string());
+        #[cfg(not(windows))]
+        let detail = self
+            .terminal()
+            .read(cx)
+            .foreground_process_name()
             .as_ref()
             .map(|name| format!("\"{}\" is still running.", name));
         let answer = window.prompt(
@@ -1856,10 +1876,20 @@ impl Item for TerminalView {
         if !self.should_confirm_close(cx) {
             return None;
         }
-        self.terminal()
-            .read(cx)
-            .foreground_process_name()
-            .map(Into::into)
+        // On Windows the cached foreground process is the shell, not the
+        // descendant we actually detected — fall through to None so the modal
+        // shows the generic "Running process" fallback.
+        #[cfg(windows)]
+        {
+            None
+        }
+        #[cfg(not(windows))]
+        {
+            self.terminal()
+                .read(cx)
+                .foreground_process_name()
+                .map(Into::into)
+        }
     }
 
     fn added_to_workspace(

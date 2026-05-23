@@ -146,6 +146,30 @@ impl PtyProcessInfo {
         RwLockReadGuard::try_map(self.system.read(), |system| system.process(pid)).ok()
     }
 
+    /// Returns true when the PTY's shell process has any live descendant processes.
+    /// Used as a Windows-friendly substitute for Unix `tcgetpgrp`: when the shell
+    /// itself is at an idle prompt it has no children, so this is false; once the
+    /// user runs anything (cc, ssh, vim, a build), that program becomes a child of
+    /// the shell and this becomes true.
+    ///
+    /// `ProcessRefreshKind::everything()` is required: a narrower refresh kind
+    /// leaves `Process::parent()` unset on Windows in this version of sysinfo.
+    pub fn has_active_descendants(&self) -> bool {
+        let Some(shell_pid) = self.pid_getter.pid() else {
+            return false;
+        };
+        let mut system = self.system.write();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::everything(),
+        );
+        system
+            .processes()
+            .values()
+            .any(|p| p.parent() == Some(shell_pid))
+    }
+
     #[cfg(unix)]
     pub(crate) fn kill_current_process(&self) -> bool {
         let Some(pid) = self.pid_getter.pid() else {
